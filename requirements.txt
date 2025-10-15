@@ -1,0 +1,12 @@
+Django==5.*
+nbclient
+nbformat
+jupyter_client
+ipykernel
+pandas
+numpy
+scipy
+openpyxl
+matplotlib
+tqdm
+python-dotenv

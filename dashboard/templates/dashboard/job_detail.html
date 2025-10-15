@@ -1,0 +1,9 @@
+{% extends "dashboard/base.html" %}
+{% block content %}
+<h2>Job {{ job.id }}</h2>
+<p>Status: <strong>{{ job.status }}</strong></p>
+{% if job.finished_at %}<p>Finished: {{ job.finished_at }}</p>{% endif %}
+<p><a href=".">Refresh</a> | <a href="/measurements/">Go to Measurements</a></p>
+<h3>Log</h3>
+<pre style="white-space: pre-wrap;">{{ job.log_text }}</pre>
+{% endblock %}

@@ -1,0 +1,7 @@
+{% extends "dashboard/base.html" %}
+{% block content %}
+<h2>Measurement {{ m.id }}</h2>
+<p>{{ m.patient.code }} | {{ m.sheet_hz }} Hz | {{ m.ear }} | {{ m.intensity_db }} dB</p>
+<p><img src="/measurements/{{ m.id }}/plot.png" alt="plot"></p>
+<p><a href="/measurements/{{ m.id }}/data.json">Download JSON</a></p>
+{% endblock %}

@@ -1,0 +1,297 @@
+{% load static %}
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Measurements</title>
+
+  <!-- Plotly -->
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+
+  <style>
+    :root { --gap: 16px; --border: #e5e7eb; --muted:#6b7280; --ink:#111827; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:var(--ink); margin:0; background:#fff; }
+    a { color:#2563eb; text-decoration:none; } a:hover{text-decoration:underline;}
+    header { padding: 14px 18px; border-bottom:1px solid var(--border); display:flex; gap:16px; }
+    main { padding: 16px 18px 28px; max-width: 1440px; margin: 0 auto; }
+
+    h1 { margin: 0 0 14px; font-size: 32px; line-height: 1.1; }
+
+    .filters {
+      display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: center;
+      margin: 10px 0 8px;
+    }
+    .filters label { display: inline-flex; align-items: center; gap:6px; }
+    .filters input[type="text"], .filters input[type="number"], .filters select {
+      border:1px solid var(--border); border-radius:6px; padding:6px 8px; min-width:140px;
+    }
+    .filters button { border:1px solid var(--border); background:#f9fafb; padding:6px 10px; border-radius:6px; }
+    .btn { border:1px solid var(--border); background:#f9fafb; padding:6px 10px; border-radius:6px; cursor:pointer; }
+    .muted { color: var(--muted); font-size: 12px; }
+
+    .slider-row { display:flex; align-items:center; gap:10px; margin: 6px 0 8px; }
+    input[type="range"] { width: 240px; }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      gap: var(--gap);
+      margin-top: 14px;
+    }
+    .card {
+      border:1px solid var(--border); border-radius:12px; padding:12px 12px 8px; background:white;
+      box-shadow: 0 1px 0 rgba(0,0,0,0.02);
+    }
+    .card h3 { margin:6px 0 10px; font-size:16px; }
+    .toolbar { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+    .chip { font-variant-numeric: tabular-nums; font-size:12px; padding:2px 6px; border-radius:6px; background:#f3f4f6; }
+    .plotbox { height: 320px; }
+    .err { color:#b91c1c; font-size: 13px; }
+    .ok { color:#065f46; font-size:12px; }
+  </style>
+</head>
+
+<body>
+  <header>
+    <a href="{% url 'dashboard:upload' %}">Upload</a>
+    <a href="{% url 'dashboard:measurements' %}">Measurements</a>
+    <a href="{% url 'admin:index' %}">Admin</a>
+  </header>
+
+  <main>
+    <h1>Measurements</h1>
+
+    <!-- Filters (Ear removed) -->
+    <form class="filters" method="get" action="{% url 'dashboard:measurements' %}">
+      <label>Hz:
+        <input type="text" name="sheet_hz" value="{{ filters.sheet_hz|default_if_none:'' }}" placeholder="500/1000/…" />
+      </label>
+
+      <label>Patient:
+        <input name="patient_code" list="patient-codes" value="{{ filters.patient_code|default_if_none:'' }}" placeholder="Pick or type a patient ID" />
+        <datalist id="patient-codes">
+          {% for code in patient_list %}<option value="{{ code }}">{% endfor %}
+        </datalist>
+      </label>
+
+      <label>dB:
+        <input type="text" name="intensity_db" value="{{ filters.intensity_db|default_if_none:'' }}" placeholder="e.g. 70" />
+      </label>
+
+      <button type="submit">Filter</button>
+      <a class="btn" href="{% url 'dashboard:measurements' %}">Clear</a>
+    </form>
+
+    <!-- Threshold + Save -->
+    <div class="slider-row">
+      <div class="muted">Threshold ×30000:</div>
+      <input id="th-slider" type="range" min="0" max="2" step="0.01" value="{{ th|default:1.0 }}">
+      <span id="th-val" class="muted">{{ th|default:1.0 }}</span>
+
+      <!-- one save-all button -->
+      <button id="save-all" class="btn">Save</button>
+      <span id="save-msg" class="muted" style="margin-left:8px;"></span>
+    </div>
+    <div class="muted">Drag to change decision boundary (Δ ≤ threshold → label=1). Plots & labels update live.</div>
+
+    <!-- PLOTS ONLY -->
+    <section class="cards">
+      {% for m in items %}
+        <article class="card plot-card"
+                 data-mid="{{ m.id }}"
+                 data-json-url="{% url 'dashboard:measurement_json' m.id %}"
+                 data-title="{{ m.patient.code }} | {{ m.sheet_hz }} Hz | {{ m.ear }} | {{ m.intensity_db }} dB"
+                 data-mode="valley">
+          <h3>{{ m.patient.code }} | {{ m.sheet_hz }} Hz | {{ m.ear }} | {{ m.intensity_db }} dB</h3>
+
+          <div class="toolbar">
+            <button type="button" class="btn btn-valley">Set Valley</button>
+            <button type="button" class="btn btn-peak">Set Peak</button>
+          </div>
+
+          <div class="muted" style="margin: 4px 0 6px;">
+            Δ: <span class="chip delta-chip">—</span>
+            • <span class="chip" style="font-size:14px;">Label: <span class="label-chip">—</span></span>
+          </div>
+
+          <div class="plotbox">
+            <div class="plotly-host" style="width:100%;height:100%;"></div>
+          </div>
+        </article>
+      {% empty %}
+        <p class="muted">No measurements match this filter.</p>
+      {% endfor %}
+    </section>
+  </main>
+
+  <!-- Expose URLs & CSRF -->
+  <script>
+    const URL_BULK_SAVE = "{% url 'dashboard:measurements_bulk_save_api' %}";
+    const CSRF_TOKEN = "{{ csrf_token }}";
+  </script>
+
+  <!-- Plotly logic -->
+  <script>
+  (function () {
+    const $ = (s, r=document)=>r.querySelector(s);
+    const $$ = (s, r=document)=>Array.from(r.querySelectorAll(s));
+
+    // slider readout
+    const thSlider = $('#th-slider');
+    const thVal    = $('#th-val');
+    const clamp    = v => Math.max(0, Math.min(2, v));
+    const getTh    = () => clamp(parseFloat(thSlider.value || '1') || 1);
+
+    thSlider.addEventListener('input', () => {
+      thVal.textContent = getTh().toFixed(2);
+      $$('.plot-card').forEach(card => { if (card._markers) draw(card); });
+    });
+
+    const toX = n => Array.from({length:n}, (_,i)=> i*2); // 2ms step
+
+    function initialVP(y){
+      const n = y.length; if (!n) return {v:null, p:null};
+      const idx = ms => Math.max(0, Math.min(n-1, Math.floor(ms/2)));
+      const vStart = idx(45), vEnd = Math.max(vStart+1, idx(150));
+      let v=vStart, ymin=y[vStart];
+      for (let i=vStart;i<=vEnd;i++) if (y[i] < ymin){ ymin=y[i]; v=i; }
+      const pStart = Math.min(v+1, n-1), pEnd = Math.max(pStart+1, idx(300));
+      let p=pStart, ymax=y[pStart];
+      for (let i=pStart;i<=pEnd;i++) if (y[i] > ymax){ ymax=y[i]; p=i; }
+      return { v, p };
+    }
+
+    function deltaAndLabel(y, v, p, th){
+      if (v==null || p==null) return {delta:null, label:null};
+      const d = Math.abs(y[p]-y[v]);
+      return { delta:d, label: (d <= th*30000) ? 1 : 0 };
+    }
+
+    async function boot(card){
+      try{
+        const res = await fetch(card.dataset.jsonUrl);
+        if(!res.ok) throw new Error('HTTP '+res.status);
+        const data = await res.json();
+        const y = (data.timeseries || []).map(n => +n || 0);
+        const x = toX(y.length);
+
+        // Prefer saved markers if present; else heuristic
+        let v = (data.manual_valley_idx ?? null);
+        let p = (data.manual_peak_idx ?? null);
+        if (v == null || p == null){
+          const vp = initialVP(y); v = vp.v; p = vp.p;
+        }
+
+        card._markers = { x, y, v, p };
+        draw(card);
+        wire(card);
+      }catch(e){
+        card.querySelector('.plotly-host').innerHTML =
+          '<div class="err">Failed to load data ('+e.message+')</div>';
+      }
+    }
+
+    function draw(card){
+      const { x, y, v, p } = card._markers;
+      const th = getTh();
+      const { delta, label } = deltaAndLabel(y, v, p, th);
+
+      const traces = [{
+        x, y, mode:'lines', line:{width:2}, name:'wave', hoverinfo:'x+y'
+      }];
+
+      if (v!=null) traces.push({
+        x:[x[v]], y:[y[v]], mode:'markers+text', text:['V'],
+        textposition:'bottom center', marker:{color:'red', size:9}, hoverinfo:'skip'
+      });
+      if (p!=null) traces.push({
+        x:[x[p]], y:[y[p]], mode:'markers+text', text:['P'],
+        textposition:'top center', marker:{color:'green', size:9}, hoverinfo:'skip'
+      });
+
+      Plotly.react(
+        card.querySelector('.plotly-host'),
+        traces,
+        {
+          margin:{t:28,r:10,b:40,l:60},
+          title:{ text: card.dataset.title, font:{size:16} },
+          xaxis:{ title:'Time (ms)', zeroline:false },
+          yaxis:{ title:'Amplitude', zeroline:false },
+          showlegend:false
+        },
+        {displayModeBar:false}
+      );
+
+      card.querySelector('.delta-chip').textContent = (delta==null?'—':Math.round(delta));
+      card.querySelector('.label-chip').textContent = (label==null?'—':label);
+    }
+
+    function wire(card){
+      const host = card.querySelector('.plotly-host');
+      card.querySelector('.btn-valley').addEventListener('click', () => card.dataset.mode='valley');
+      card.querySelector('.btn-peak').addEventListener('click',   () => card.dataset.mode='peak');
+
+      host.on('plotly_click', ev => {
+        if(!ev.points || !ev.points.length) return;
+        const ms = ev.points[0].x;
+        const idx = Math.max(0, Math.min(card._markers.y.length-1, Math.round(ms/2)));
+        if ((card.dataset.mode || 'valley') === 'valley') card._markers.v = idx;
+        else card._markers.p = idx;
+        draw(card);
+      });
+    }
+
+    // Save All
+    $('#save-all').addEventListener('click', async () => {
+      const msg = $('#save-msg');
+      msg.textContent = 'Saving…';
+      const th = getTh();
+
+      const items = $$('.plot-card').map(card => {
+        const mid = parseInt(card.dataset.mid, 10);
+        const { v, p } = card._markers || {};
+        if (mid && v != null && p != null) {
+          return { id: mid, valley_idx: v, peak_idx: p };
+        }
+        return null;
+      }).filter(Boolean);
+
+      try{
+        const res = await fetch(URL_BULK_SAVE, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': CSRF_TOKEN,
+          },
+          body: JSON.stringify({ th, items })
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'Save failed');
+
+        const byId = Object.create(null);
+        (data.results || []).forEach(r => byId[r.id] = r);
+
+        $$('.plot-card').forEach(card => {
+          const mid = parseInt(card.dataset.mid, 10);
+          const r = byId[mid];
+          if (!r) return;
+          card._markers.v = r.valley_idx;
+          card._markers.p = r.peak_idx;
+          draw(card);
+        });
+
+        msg.textContent = 'Saved.';
+        msg.className = 'ok';
+        setTimeout(()=>{ msg.textContent=''; msg.className='muted'; }, 1500);
+      }catch(e){
+        msg.textContent = 'Save failed: ' + e.message;
+        msg.className = 'err';
+      }
+    });
+
+    $$('.plot-card').forEach(boot);
+  })();
+  </script>
+</body>
+</html>
