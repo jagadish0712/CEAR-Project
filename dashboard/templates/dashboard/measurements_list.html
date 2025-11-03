@@ -18,6 +18,7 @@
 
     h1 { margin: 0 0 14px; font-size: 32px; line-height: 1.1; }
 
+    /* filter row */
     .filters {
       display: flex; flex-wrap: wrap; gap: 10px 12px; align-items: center;
       margin: 10px 0 8px;
@@ -26,13 +27,13 @@
     .filters input[type="text"], .filters input[type="number"], .filters select {
       border:1px solid var(--border); border-radius:6px; padding:6px 8px; min-width:140px;
     }
-    .filters button { border:1px solid var(--border); background:#f9fafb; padding:6px 10px; border-radius:6px; }
-    .btn { border:1px solid var(--border); background:#f9fafb; padding:6px 10px; border-radius:6px; cursor:pointer; }
+    .filters button, .btn { border:1px solid var(--border); background:#f9fafb; padding:6px 10px; border-radius:6px; cursor:pointer; }
     .muted { color: var(--muted); font-size: 12px; }
 
     .slider-row { display:flex; align-items:center; gap:10px; margin: 6px 0 8px; }
     input[type="range"] { width: 240px; }
 
+    /* plot cards grid (no table on page) */
     .cards {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
@@ -46,9 +47,9 @@
     .card h3 { margin:6px 0 10px; font-size:16px; }
     .toolbar { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
     .chip { font-variant-numeric: tabular-nums; font-size:12px; padding:2px 6px; border-radius:6px; background:#f3f4f6; }
+    .chip.label { font-size:14px; font-weight:600; }
     .plotbox { height: 320px; }
     .err { color:#b91c1c; font-size: 13px; }
-    .ok { color:#065f46; font-size:12px; }
   </style>
 </head>
 
@@ -62,7 +63,7 @@
   <main>
     <h1>Measurements</h1>
 
-    <!-- Filters (Ear removed) -->
+    <!-- Filters -->
     <form class="filters" method="get" action="{% url 'dashboard:measurements' %}">
       <label>Hz:
         <input type="text" name="sheet_hz" value="{{ filters.sheet_hz|default_if_none:'' }}" placeholder="500/1000/…" />
@@ -81,17 +82,16 @@
 
       <button type="submit">Filter</button>
       <a class="btn" href="{% url 'dashboard:measurements' %}">Clear</a>
+
+      <!-- IMPORTANT: prevent form submit -->
+      <button type="button" id="save-all" class="btn">Save</button>
     </form>
 
-    <!-- Threshold + Save -->
+    <!-- Threshold slider -->
     <div class="slider-row">
       <div class="muted">Threshold ×30000:</div>
       <input id="th-slider" type="range" min="0" max="2" step="0.01" value="{{ th|default:1.0 }}">
       <span id="th-val" class="muted">{{ th|default:1.0 }}</span>
-
-      <!-- one save-all button -->
-      <button id="save-all" class="btn">Save</button>
-      <span id="save-msg" class="muted" style="margin-left:8px;"></span>
     </div>
     <div class="muted">Drag to change decision boundary (Δ ≤ threshold → label=1). Plots & labels update live.</div>
 
@@ -112,7 +112,7 @@
 
           <div class="muted" style="margin: 4px 0 6px;">
             Δ: <span class="chip delta-chip">—</span>
-            • <span class="chip" style="font-size:14px;">Label: <span class="label-chip">—</span></span>
+            • Label: <span class="chip label label-chip">—</span>
           </div>
 
           <div class="plotbox">
@@ -125,13 +125,12 @@
     </section>
   </main>
 
-  <!-- Expose URLs & CSRF -->
+  <!-- Expose bulk-save URL for JS -->
   <script>
-    const URL_BULK_SAVE = "{% url 'dashboard:measurements_bulk_save_api' %}";
-    const CSRF_TOKEN = "{{ csrf_token }}";
+    window.BULK_SAVE_URL = "{% url 'dashboard:measurements_bulk_save_api' %}";
   </script>
 
-  <!-- Plotly logic -->
+  <!-- Plotly logic (no y=0 baseline) + Save -->
   <script>
   (function () {
     const $ = (s, r=document)=>r.querySelector(s);
@@ -150,15 +149,19 @@
 
     const toX = n => Array.from({length:n}, (_,i)=> i*2); // 2ms step
 
+    // heuristic initial V/P like PNG view
     function initialVP(y){
       const n = y.length; if (!n) return {v:null, p:null};
       const idx = ms => Math.max(0, Math.min(n-1, Math.floor(ms/2)));
+
       const vStart = idx(45), vEnd = Math.max(vStart+1, idx(150));
       let v=vStart, ymin=y[vStart];
       for (let i=vStart;i<=vEnd;i++) if (y[i] < ymin){ ymin=y[i]; v=i; }
+
       const pStart = Math.min(v+1, n-1), pEnd = Math.max(pStart+1, idx(300));
       let p=pStart, ymax=y[pStart];
       for (let i=pStart;i<=pEnd;i++) if (y[i] > ymax){ ymax=y[i]; p=i; }
+
       return { v, p };
     }
 
@@ -176,13 +179,7 @@
         const y = (data.timeseries || []).map(n => +n || 0);
         const x = toX(y.length);
 
-        // Prefer saved markers if present; else heuristic
-        let v = (data.manual_valley_idx ?? null);
-        let p = (data.manual_peak_idx ?? null);
-        if (v == null || p == null){
-          const vp = initialVP(y); v = vp.v; p = vp.p;
-        }
-
+        const { v, p } = initialVP(y);
         card._markers = { x, y, v, p };
         draw(card);
         wire(card);
@@ -196,6 +193,10 @@
       const { x, y, v, p } = card._markers;
       const th = getTh();
       const { delta, label } = deltaAndLabel(y, v, p, th);
+
+      // keep for (optional) client display on save
+      card._markers.lastDelta = delta;
+      card._markers.lastLabel = label;
 
       const traces = [{
         x, y, mode:'lines', line:{width:2}, name:'wave', hoverinfo:'x+y'
@@ -242,54 +243,47 @@
       });
     }
 
-    // Save All
-    $('#save-all').addEventListener('click', async () => {
-      const msg = $('#save-msg');
-      msg.textContent = 'Saving…';
-      const th = getTh();
+    // ---------- Save (bulk) ----------
+    function getCookie(name) {
+      const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+      return m ? m.pop() : '';
+    }
+    const csrftoken = getCookie('csrftoken');
 
-      const items = $$('.plot-card').map(card => {
-        const mid = parseInt(card.dataset.mid, 10);
-        const { v, p } = card._markers || {};
-        if (mid && v != null && p != null) {
-          return { id: mid, valley_idx: v, peak_idx: p };
+    function collectPayload() {
+      const items = [];
+      $$('.plot-card').forEach(card => {
+        if (!card._markers) return;
+        items.push({
+          id: Number(card.dataset.mid),
+          valley_idx: card._markers.v ?? null,
+          peak_idx:   card._markers.p ?? null
+        });
+      });
+      return { items };
+    }
+
+    const saveBtn = document.getElementById('save-all');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        try {
+          const res = await fetch(window.BULK_SAVE_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
+            body: JSON.stringify(collectPayload())
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          // Optional visual feedback
+          saveBtn.textContent = 'Saved ✓';
+          setTimeout(() => (saveBtn.textContent = 'Save'), 1200);
+        } catch (e) {
+          console.error(e);
+          alert('Save failed: ' + e.message);
         }
-        return null;
-      }).filter(Boolean);
+      });
+    }
 
-      try{
-        const res = await fetch(URL_BULK_SAVE, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': CSRF_TOKEN,
-          },
-          body: JSON.stringify({ th, items })
-        });
-        const data = await res.json();
-        if (!data.ok) throw new Error(data.error || 'Save failed');
-
-        const byId = Object.create(null);
-        (data.results || []).forEach(r => byId[r.id] = r);
-
-        $$('.plot-card').forEach(card => {
-          const mid = parseInt(card.dataset.mid, 10);
-          const r = byId[mid];
-          if (!r) return;
-          card._markers.v = r.valley_idx;
-          card._markers.p = r.peak_idx;
-          draw(card);
-        });
-
-        msg.textContent = 'Saved.';
-        msg.className = 'ok';
-        setTimeout(()=>{ msg.textContent=''; msg.className='muted'; }, 1500);
-      }catch(e){
-        msg.textContent = 'Save failed: ' + e.message;
-        msg.className = 'err';
-      }
-    });
-
+    // boot all cards
     $$('.plot-card').forEach(boot);
   })();
   </script>

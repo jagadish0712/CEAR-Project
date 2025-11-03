@@ -24,12 +24,9 @@ from django.views.decorators.http import require_POST
 from .executor import submit_job
 from .forms import UploadForm
 from .models import UploadJob, Patient, Measurement
-from .state_store import get_state, update_state
 
 
-# -------------------------------
-# Upload & Job detail
-# -------------------------------
+# ---------------- Upload ----------------
 
 def upload_view(request: HttpRequest):
     if request.method == "POST":
@@ -46,19 +43,17 @@ def upload_view(request: HttpRequest):
     return render(request, "dashboard/upload.html", {"form": form})
 
 
-def job_detail_view(request: HttpRequest, job_id: int):
+def job_detail_view(request: HttpRequest, job_id):
     job = get_object_or_404(UploadJob, pk=job_id)
     return render(request, "dashboard/job_detail.html", {"job": job})
 
 
-# -------------------------------
-# Measurements list (Plotly cards)
-# -------------------------------
+# -------------- Measurements list --------------
 
 def measurements_list_view(request: HttpRequest):
     qs = Measurement.objects.select_related("patient").all()
 
-    # Filters (Ear removed)
+    # Filters (Ear removed as requested)
     patient_code = (request.GET.get("patient_code") or "").strip()
     sheet_hz = request.GET.get("sheet_hz") or ""
     intensity_db = request.GET.get("intensity_db") or ""
@@ -87,9 +82,7 @@ def measurements_list_view(request: HttpRequest):
 
     patient_list = (
         Patient.objects.filter(measurement__isnull=False)
-        .order_by("code")
-        .values_list("code", flat=True)
-        .distinct()
+        .order_by("code").values_list("code", flat=True).distinct()
     )
 
     return render(
@@ -108,9 +101,7 @@ def measurements_list_view(request: HttpRequest):
     )
 
 
-# -------------------------------
-# Detail page + PNG (unchanged)
-# -------------------------------
+# -------------- Detail (optional) --------------
 
 def measurement_detail_view(request: HttpRequest, pk: int):
     m = get_object_or_404(Measurement, pk=pk)
@@ -142,7 +133,6 @@ def measurement_plot_png_view(request: HttpRequest, pk: int):
         if not math.isfinite(f):
             f = 0.0
         y.append(f)
-
     x = list(range(0, 2 * len(y), 2))
 
     def draw_plain(title_suffix=""):
@@ -216,9 +206,7 @@ def measurement_plot_png_view(request: HttpRequest, pk: int):
         return draw_plain()
 
 
-# -------------------------------
-# JSON for Plotly (reads saved state)
-# -------------------------------
+# -------------- JSON for Plotly --------------
 
 def measurement_json_view(request: HttpRequest, pk: int):
     m = get_object_or_404(Measurement, pk=pk)
@@ -234,8 +222,6 @@ def measurement_json_view(request: HttpRequest, pk: int):
             f = 0.0
         ts.append(f)
 
-    state = get_state(pk)
-
     payload = {
         "id": m.id,
         "patient": m.patient.code,
@@ -243,17 +229,16 @@ def measurement_json_view(request: HttpRequest, pk: int):
         "ear": m.ear,
         "intensity_db": int(m.intensity_db) if m.intensity_db is not None else None,
         "timeseries": ts,
-        "manual_valley_idx": state.get("valley_idx", getattr(m, "manual_valley_idx", None)),
-        "manual_peak_idx": state.get("peak_idx", getattr(m, "manual_peak_idx", None)),
-        "label": state.get("label", int(m.label) if m.label is not None else None),
-        "abs_diff": state.get("delta", float(m.abs_diff) if m.abs_diff is not None else None),
+        "label": int(m.label) if m.label is not None else None,
+        "abs_diff": float(m.abs_diff) if m.abs_diff is not None else None,
+        "manual_valley_idx": getattr(m, "manual_valley_idx", None),
+        "manual_peak_idx": getattr(m, "manual_peak_idx", None),
+        "labeled_image": str(m.labeled_image_rel) if getattr(m, "labeled_image_rel", None) else None,
     }
     return JsonResponse(payload)
 
 
-# -------------------------------
-# Single annotate API (optional)
-# -------------------------------
+# -------------- Single annotate API (optional) --------------
 
 @require_POST
 def measurement_annotate_api(request: HttpRequest, pk: int):
@@ -297,114 +282,131 @@ def measurement_annotate_api(request: HttpRequest, pk: int):
 
     idx = max(0, min(n - 1, idx))
 
-    cur = get_state(m.id)
-    mv = cur.get("valley_idx")
-    mp = cur.get("peak_idx")
-    if kind == "valley":
-        mv = idx
-    else:
-        mp = idx
+    if hasattr(m, "manual_valley_idx") and kind == "valley":
+        m.manual_valley_idx = idx
+    if hasattr(m, "manual_peak_idx") and kind == "peak":
+        m.manual_peak_idx = idx
+
+    # complete the pair & compute
+    def ms_to_idx(ms: int) -> int:
+        i = int(ms // 2)
+        return max(0, min(n - 1, i))
+
+    mv = getattr(m, "manual_valley_idx", None)
+    mp = getattr(m, "manual_peak_idx", None)
 
     if mv is None:
-        mv = 0
+        vs, ve = ms_to_idx(45), ms_to_idx(150)
+        seg = np.asarray(y[vs:ve + 1], dtype=float)
+        mv = vs + int(np.nanargmin(seg)) if seg.size > 0 else 0
+
     if mp is None:
-        mp = mv
+        right_start = min(mv + 1, n - 1)
+        right_end = min(ms_to_idx(300), n - 1)
+        seg = np.asarray(y[right_start:right_end + 1], dtype=float)
+        mp = right_start + int(np.nanargmax(seg)) if seg.size > 0 else mv
 
     delta = float(abs(y[mp] - y[mv]))
     label_now = 1 if delta <= eff_threshold else 0
 
-    update_state(m.id, valley_idx=mv, peak_idx=mp, delta=delta, label=label_now)
-
+    if hasattr(m, "abs_diff"):
+        m.abs_diff = delta
+    if hasattr(m, "label"):
+        m.label = label_now
     try:
-        if hasattr(m, "manual_valley_idx"): m.manual_valley_idx = mv
-        if hasattr(m, "manual_peak_idx"):   m.manual_peak_idx = mp
-        if hasattr(m, "abs_diff"):          m.abs_diff = delta
-        if hasattr(m, "label"):             m.label = label_now
-        m.save()
+        m.save(update_fields=["abs_diff", "label", "manual_valley_idx", "manual_peak_idx"])
     except Exception:
-        pass
+        m.save()
 
-    return JsonResponse(
-        {"ok": True, "valley_idx": mv, "peak_idx": mp, "delta": delta, "label": label_now}
-    )
+    return JsonResponse({"ok": True, "valley_idx": mv, "peak_idx": mp, "delta": delta, "label": label_now})
 
 
-# -------------------------------
-# Bulk Save API (one button)
-# -------------------------------
+# -------------- BULK save API (used by Save button) --------------
 
 @require_POST
 def measurements_bulk_save_api(request: HttpRequest):
+    """
+    Body JSON:
+    {
+      "items": [
+        {"id": 123, "valley_idx": 78, "peak_idx": 156},
+        ...
+      ]
+    }
+    Recomputes Δ and label at th (from query string or default 1.0).
+    """
     try:
         body = json.loads(request.body.decode("utf-8"))
+        items = body.get("items", [])
     except Exception:
-        return JsonResponse({"ok": False, "error": "Invalid JSON"}, status=400)
+        return JsonResponse({"ok": False, "error": "Invalid JSON body"}, status=400)
 
     try:
-        th = float(body.get("th", 1.0))
-    except Exception:
+        th = float(request.GET.get("th", "1") or "1")
+    except ValueError:
         th = 1.0
     th = max(0.0, min(2.0, th))
     eff_threshold = th * 30000.0
 
-    items = body.get("items") or []
-    if not isinstance(items, list):
-        return JsonResponse({"ok": False, "error": "items must be a list"}, status=400)
+    updated = []
 
-    results = []
     for it in items:
         try:
             mid = int(it.get("id"))
-            v   = it.get("valley_idx")
-            p   = it.get("peak_idx")
-            if v is None or p is None:
-                continue
-            m = Measurement.objects.select_related("patient").get(pk=mid)
         except Exception:
+            continue
+        m = Measurement.objects.select_related("patient").filter(pk=mid).first()
+        if not m:
             continue
 
         raw = m.timeseries_json or []
         y: list[float] = []
-        for vv in raw:
+        for v in raw:
             try:
-                f = float(vv)
+                f = float(v)
             except Exception:
                 f = 0.0
             if not math.isfinite(f):
                 f = 0.0
             y.append(f)
-
-        n = len(y)
-        if n == 0:
+        if not y:
             continue
 
-        v = max(0, min(n - 1, int(v)))
-        p = max(0, min(n - 1, int(p)))
+        n = len(y)
+        v_idx = it.get("valley_idx")
+        p_idx = it.get("peak_idx")
+        if v_idx is None or p_idx is None:
+            # fallback to the same heuristic
+            def ms_to_idx(ms: int) -> int:
+                return max(0, min(n - 1, int(ms // 2)))
+            vs, ve = ms_to_idx(45), ms_to_idx(150)
+            seg = np.asarray(y[vs:ve + 1], dtype=float)
+            v_idx = vs + int(np.nanargmin(seg)) if seg.size > 0 else 0
+            right_start = min(v_idx + 1, n - 1)
+            right_end = min(ms_to_idx(300), n - 1)
+            seg2 = np.asarray(y[right_start:right_end + 1], dtype=float)
+            p_idx = right_start + int(np.nanargmax(seg2)) if seg2.size > 0 else v_idx
 
-        delta = float(abs(y[p] - y[v]))
+        v_idx = max(0, min(n - 1, int(v_idx)))
+        p_idx = max(0, min(n - 1, int(p_idx)))
+
+        delta = float(abs(y[p_idx] - y[v_idx]))
         label_now = 1 if delta <= eff_threshold else 0
 
-        update_state(mid, valley_idx=v, peak_idx=p, delta=delta, label=label_now)
-
+        # persist
+        if hasattr(m, "manual_valley_idx"):
+            m.manual_valley_idx = v_idx
+        if hasattr(m, "manual_peak_idx"):
+            m.manual_peak_idx = p_idx
+        if hasattr(m, "abs_diff"):
+            m.abs_diff = delta
+        if hasattr(m, "label"):
+            m.label = label_now
         try:
-            changed_fields = []
-            if hasattr(m, "manual_valley_idx"):
-                m.manual_valley_idx = v
-                changed_fields.append("manual_valley_idx")
-            if hasattr(m, "manual_peak_idx"):
-                m.manual_peak_idx = p
-                changed_fields.append("manual_peak_idx")
-            if hasattr(m, "abs_diff"):
-                m.abs_diff = delta
-                changed_fields.append("abs_diff")
-            if hasattr(m, "label"):
-                m.label = label_now
-                changed_fields.append("label")
-            if changed_fields:
-                m.save(update_fields=list(set(changed_fields)))
+            m.save(update_fields=["manual_valley_idx", "manual_peak_idx", "abs_diff", "label"])
         except Exception:
-            pass
+            m.save()
 
-        results.append({"id": mid, "delta": delta, "label": label_now, "valley_idx": v, "peak_idx": p})
+        updated.append({"id": m.id, "valley_idx": v_idx, "peak_idx": p_idx, "delta": delta, "label": label_now})
 
-    return JsonResponse({"ok": True, "results": results})
+    return JsonResponse({"ok": True, "updated": updated})
