@@ -26,15 +26,15 @@ SECRET_KEY = 'django-insecure-&hr*&x994h$5ec5frjp8s^xxqat=(g_s1us02)(#l!j12t_7!f
 DEBUG = True
 
 ALLOWED_HOSTS = [
-    "18.234.172.187",
-    "ec2-18-234-172-187.compute-1.amazonaws.com",
+    "13.218.123.138",
+    "ec2-13-218-123-138.compute-1.amazonaws.com",
     "localhost",
     "127.0.0.1",
 ]
 
 CSRF_TRUSTED_ORIGINS = [
-    "http://18.234.172.187",
-    "http://ec2-18-234-172-187.compute-1.amazonaws.com",
+    "http://13.218.123.138",
+    "http://ec2-13-218-123-138.compute-1.amazonaws.com",
 ]
 
 
